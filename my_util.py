@@ -1,0 +1,296 @@
+from orbit import *
+from body import *
+import numpy as np
+from astropy import constants as const
+from astropy import units as u
+
+
+def euler_321_attitude(phi, theta, psi):
+    # Appendix B 3-2-1 matrix OR sec 2.9 pg55
+    A11 = np.cos(theta)*np.cos(phi)
+    A12 = np.cos(theta)*np.sin(phi)
+    A13 = -np.sin(theta)
+    A21 = (-np.cos(psi)*np.sin(phi)) + (np.sin(psi)*np.sin(theta)*np.cos(phi))
+    A22 = (np.cos(psi)*np.cos(phi)) + (np.sin(psi)*np.sin(theta)*np.sin(phi))
+    A23 = np.sin(psi)*np.cos(theta)
+    A31 = (np.sin(psi)*np.sin(phi)) + (np.cos(psi)*np.sin(theta)*np.cos(phi))
+    A32 = (-np.sin(psi)*np.cos(phi)) + (np.cos(psi)*np.sin(theta)*np.sin(phi))
+    A33 = np.cos(psi)*np.cos(theta)
+
+    return np.array([[A11, A12, A13],
+                     [A21, A22, A23],
+                     [A31, A32, A33]])
+
+
+def attitude_to_euler321(attitude):
+    # https://en.wikiversity.org/wiki/PlanetPhysics/Direction_Cosine_Matrix_to_Euler_321_Angles
+    # phi_1, theta_2, psi_3
+    A11 = attitude[0][0]
+    A12 = attitude[0][1]
+    A13 = attitude[0][2]
+    A23 = attitude[1][2]
+    A33 = attitude[2][2]
+
+    theta = np.arcsin(-A13)
+    phi = np.atan2(A12, A11)
+    psi = np.atan2(A23, A33)
+
+    return np.array([phi, theta, psi])
+
+
+# Sets up single Runge Kutta 4 Step
+def RK4_single_step(fun, dt, t0, y0, fun_arg: list):
+    # evaluates inputted function, fun, at t0, y0, and inputted args to create 4 constants to solve 1 rk4 step
+    k1 = fun(t0, y0, fun_arg)
+    k2 = fun((t0 + (dt/2)), (y0 + ((dt.value/2)*k1)), fun_arg)
+    k3 = fun((t0 + (dt/2)), (y0 + ((dt.value/2)*k2)), fun_arg)
+    k4 = fun((t0 + dt), (y0 + (dt.value*k3)), fun_arg)
+
+    y1 = y0 + (dt.value/6)*(k1 + 2*k2 + 2*k3 + k4)
+    return y1
+
+
+def skew_mtx(x_vec):
+    x1 = x_vec[0]
+    x2 = x_vec[1]
+    x3 = x_vec[2]
+
+    return np.array([[0, -x3,  x2],
+                     [x3,   0, -x1],
+                     [-x2,  x1,   0]
+                     ])
+
+
+def lambert_solver(r1_vec, r2_vec, tof, mu, desired_path='short'):
+    """
+    Returns a, e, p, v1, v2 of the transfer orbit
+    Follows 458 lectures
+    Uses method described in Prussing, John E., and Bruce A. Conway. Orbital Mechanics. Oxford University Press, 2013. 
+    """
+
+    r1 = np.linalg.norm(r1_vec)
+    r2 = np.linalg.norm(r2_vec)
+
+    if desired_path == 'short':
+        delta_f = np.arccos((np.dot(r1_vec, r2_vec)) / (r1*r2))
+    elif desired_path == 'long':
+        delta_f = (2*np.pi) - np.arccos((np.dot(r1_vec, r2_vec)) / (r1*r2))
+    # print(f'Delta F: {np.rad2deg(delta_f)} deg')
+
+    # Calc chord and space triangel perimeter
+    c = np.sqrt(r1**2 + r2**2 - 2*r1*r2*np.cos(delta_f))  # type:ignore
+    s = (r1 + r2 + c) / 2
+
+    # Calc t_parab
+    if 0 <= delta_f < np.pi:  # type:ignore
+        t_parab = (1/3) * np.sqrt(2/mu) * (s**(3/2) - ((s-c)**(3/2)))
+    elif np.pi <= delta_f < 2*np.pi:  # type:ignore
+        t_parab = (1/3) * np.sqrt(2/mu) * (s**(3/2) + ((s-c)**(3/2)))
+
+    # Calculate minumum transfer
+    a_m = s/2
+    alpha_m = np.pi
+    if 0 <= delta_f < np.pi:  # type:ignore
+        beta_m = 2*np.arcsin(np.sqrt((s-c)/s))
+    elif np.pi <= delta_f < 2*np.pi:  # type:ignore
+        beta_m = -2*np.arcsin(np.sqrt((s-c)/s))
+
+    tm = np.sqrt((s**3)/(8 * mu)) * \
+        (np.pi - beta_m + np.sin(beta_m))  # type:ignore
+
+ # Solve for a, p and e
+    if tof > t_parab:  # elliptical case
+        # Define alpha and beta
+        if tof <= tm:
+            def alpha(a): return 2*np.arcsin(np.sqrt((s/(2*a))))
+        elif tof > tm:
+            def alpha(a): return 2*np.pi - 2*np.arcsin(np.sqrt((s/(2*a))))
+
+        if 0 <= delta_f < np.pi:  # type:ignore
+            def beta(a): return 2*np.arcsin(np.sqrt((s-c)/(2*a)))
+        elif np.pi <= delta_f < 2*np.pi:  # type:ignore
+            def beta(a): return -2*np.arcsin(np.sqrt((s-c)/(2*a)))
+
+        def lambert_eq(a): return ((np.sqrt(a**3)) * (alpha(a) -
+                                                      np.sin(alpha(a)) - beta(a) + np.sin(beta(a)))) - ((np.sqrt(mu))*tof)
+
+        a = optimize.brentq(lambert_eq, a_m, a_m*100)
+        p = (((4*a)*(s-r1)*(s-r2))/(c**2)) * \
+            (np.sin((alpha(a) + beta(a))/2)**2)
+        e = np.sqrt(1 - (p/a))
+
+    elif tof < t_parab:  # hyperbolic case
+
+        def alpha_h(a): return 2*np.arcsinh(np.sqrt(s/(-2*a)))
+        def beta_h(a): return 2*np.arcsinh(np.sqrt((s-c)/(-2*a)))
+
+        if 0 <= delta_f < np.pi:
+            def lambert_eq(a): return ((np.sqrt((-a)**3)) * (np.sinh(alpha_h(a)) -
+                                                             alpha_h(a) - np.sinh(beta_h(a)) + beta_h(a))) - (np.sqrt(mu)*tof)
+        elif np.pi <= delta_f < 2*np.pi:
+            def lambert_eq(a): return ((np.sqrt((-a)**3)) * (np.sinh(alpha_h(a)) -
+                                                             alpha_h(a) + np.sinh(beta_h(a)) - beta_h(a))) - (np.sqrt(mu)*tof)
+
+        a = optimize.brentq(lambert_eq, -a_m*1000, -a_m)
+        p = (((4*(-a))*(s-r1)*(s-r2))/(c**2)) * \
+            (np.sinh((alpha_h(a) + beta_h(a))/2)**2)
+        e = np.sqrt(1 - (p/a))
+
+    # Calculate v1 @ r1 and v2 @ r2
+    # Calc unit vectors
+    u1 = r1_vec / r1
+    u2 = r2_vec / r2
+    uc = (r2_vec - r1_vec) / c
+
+    if tof > t_parab:  # Elliptical
+        A = np.sqrt(mu/(4*a))*(1/np.tan(alpha(a)/2))
+        B = np.sqrt(mu/(4*a))*(1/np.tan(beta(a)/2))
+    else:  # Hyperbolic
+        A = np.sqrt(mu/(4*(-a)))*(1/np.tanh(alpha_h(a)/2))
+        B = np.sqrt(mu/(4*(-a)))*(1/np.tanh(beta_h(a)/2))
+
+    v1 = (B+A)*uc + (B-A)*u1
+    v2 = (B+A)*uc - (B-A)*u2
+
+    return a, p, e, v1, v2
+
+
+def orb_2_pqw(r, f, e, p, mu):
+    """
+    Transforms orbital frame to perifocal frame
+    """
+    r_pqw = np.array([r*np.cos(f), r*np.sin(f), r*0])
+    v_pqw = np.array(
+        [-np.sqrt(mu/p)*np.sin(f), np.sqrt(mu/p)*(e + np.cos(f)), 0])
+
+    return r_pqw, v_pqw
+
+
+def perif_2_eci(r_pqw, v_pqw, inc, raan, aop):
+    """
+    Transforms perifocal fram to ECI frame
+    """
+    # Rotation matrices
+    R1 = np.array([  # Third axis rotation about raan
+        [np.cos(raan), -np.sin(raan), 0],
+        [np.sin(raan),  np.cos(raan), 0],
+        [0,             0,            1]
+    ])
+    R2 = np.array([  # First axis rotation about inc
+        [1, 0,              0],
+        [0, np.cos(inc), -np.sin(inc)],
+        [0, np.sin(inc),  np.cos(inc)]
+    ])
+    R3 = np.array([  # Third axis rotation about aop
+        [np.cos(aop), -np.sin(aop), 0],
+        [np.sin(aop),  np.cos(aop), 0],
+        [0,            0,           1]
+    ])
+    perif_2_eci_DCM = R1 @ R2 @ R3
+    r_eci = perif_2_eci_DCM @ r_pqw
+    v_eci = perif_2_eci_DCM @ v_pqw
+
+    return r_eci, v_eci
+
+
+def y_dot(t, y, mu):
+    """
+    Two Body physics used for propagation
+    """
+    # print(y)
+    rx, ry, rz, vx, vy, vz = y  # Deconstruct State to get r_vec
+    r = np.array([rx, ry, rz])
+    r_norm = np.linalg.norm(r)
+    ax, ay, az = -r*mu/r_norm**3  # Two body Problem ODE
+    return [vx, vy, vz, ax, ay, az]
+
+
+def y_dot_n_body(t, y, central_body: Body, n_bodies: int, bodies: list[Body]):
+    """
+    Propgates every body relative to every other body at each time step. 
+    """
+    G = 6.674 * 10**-11  # m^3 kg^-1 s^-2
+
+    y_dot = np.zeros(n_bodies*6)
+
+    i = 0
+    for _ in range(len(bodies)):
+
+        y_nbody = y[i:i+6]
+        r_nbody = y_nbody[0:3]
+        v_nbody = y_nbody[3:6]
+        r_nbody_mag = np.linalg.norm(r_nbody)
+        a_nbody = ((-G*central_body.mass)/(r_nbody_mag**3))*r_nbody
+
+        ii = 0
+        for body in bodies:
+            y_kbody = y[ii:ii+6]
+
+            if (y_kbody == y_nbody).all():
+                pass
+            else:
+                r_kbody = y_kbody[0:3]
+                v_kbody = y_kbody[3:6]
+                r_kbody_mag = np.linalg.norm(r_kbody)
+
+                r = r_kbody - r_nbody
+                r_mag = np.linalg.norm(r)
+                a_nbody += ((G*body.mass)/(r_mag**3)) * r
+
+            ii += 6
+
+        y_dot[i:i+6] = np.concatenate((v_nbody, a_nbody))
+        i += 6
+
+    return y_dot
+
+
+def rv_2_orb_elm(r, v, mu):
+    """
+    Given an r, v vectors and mu of a orbit, calculates all orbital elements. 
+    Based on 458 notes 2/10
+    """
+
+    I = [1, 0, 0]
+    J = [0, 1, 0]
+    K = [0, 0, 1]
+
+    r_mag = np.linalg.norm(r)
+    v_mag = np.linalg.norm(v)
+
+    energy = ((v_mag**2) / 2) - (mu/r_mag)
+    a = -mu/(2*energy)
+
+    h_vec = np.cross(r, v)
+    h = np.linalg.norm(h_vec)
+
+    e_vec = (np.cross(v, h_vec)/mu) - (r/r_mag)
+    e = np.linalg.norm(e_vec)
+
+    cos_i = np.dot(K, h_vec) / h
+    i = np.arccos(cos_i)
+
+    # Numpy has a special atan2, not using because we do a quad check?
+    Kxh = np.cross(K, h_vec)
+    n = (Kxh)/(np.linalg.norm(Kxh))
+
+    raan = np.arctan((np.dot(J, n) / np.dot(I, n)))
+
+    rann_quad_check = np.dot(n, I)
+    if rann_quad_check < 0:
+        raan += np.pi
+
+    # aop quad check
+    aop = np.arccos((np.dot(e_vec, n))/e)
+
+    aop_quad_check = np.dot(e_vec, K)
+    if aop_quad_check < 0:
+        aop = (2*np.pi) - aop
+
+    f = np.arccos(np.dot(e_vec, r)/(e*r_mag))
+
+    radial_v = np.dot(r, (v/r_mag))
+    if radial_v < 0:
+        f = (2*np.pi) - f
+
+    return a, e, e_vec, i, raan, aop, f
