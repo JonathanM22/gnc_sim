@@ -1,14 +1,7 @@
 import numpy as np
-from scipy.integrate import ode
-from scipy import optimize
-
-import astropy
-from astropy.time import Time
-from astropy.time import TimeDelta
 from astropy import units as u
 from astropy.coordinates import solar_system_ephemeris
 from astropy.coordinates import get_body_barycentric_posvel
-from astropy import constants as const
 
 
 class Body:

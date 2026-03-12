@@ -1,11 +1,4 @@
-# Custom libs
-from orbit import *
-from my_util import *
-from body import *
-from quaternion import *
-from reactionwh import *
-
-# Standard libs
+# Third-party libs
 import numpy as np
 from scipy import stats
 import matplotlib.pyplot as plt
@@ -18,59 +11,12 @@ from astropy.coordinates import solar_system_ephemeris
 from astropy.coordinates import get_body_barycentric_posvel
 from astropy.coordinates import get_body_barycentric
 
-
-def F_mtx(sat_w_pos):
-
-    return np.block([
-        [-skew_mtx(sat_w_pos.flatten()), -np.eye(3)],
-        [np.zeros((3, 3)), np.zeros((3, 3))]
-    ])
-
-
-def P_dyanmics(t0, y0, fun_arg):
-    P = y0
-    F = fun_arg[0]
-    G = fun_arg[1]
-    Q = fun_arg[2]
-    P_dot = (F@P) + (P@F.T) + (G@Q@G.T)
-    return P_dot
-
-
-def star_tracker_measurment(q_true):
-    rng = np.random.default_rng()
-
-    # Model from:
-    # https://s3vi.ndc.nasa.gov/ssri-kb/static/resources/Attitude%20Determination%20&%20Control%20System%20Design%20and%20Implementation.pdf
-
-    sigma_roll = 40 * (np.pi / (180*3600))  # arcsec to rad
-    sigma_bs = 6 * (np.pi / (180*3600))  # arcsec to rad
-
-    phi_roll = rng.normal(0.0, sigma_roll)
-    phi_bs = rng.normal(0.0, sigma_bs)
-
-    # Error in roll
-    e_r = np.array([1, 0, 0])
-    q_str_roll = Quaternion(np.array([
-        np.sin(phi_roll/2)*e_r[0],
-        np.sin(phi_roll/2)*e_r[1],
-        np.sin(phi_roll/2)*e_r[2],
-        np.cos(phi_roll/2)]).reshape(4, 1))
-
-    # Error in boresight
-    theta = rng.uniform(-np.deg2rad(1), np.deg2rad(1))
-    e_bs = np.array([0, np.cos(theta), np.sin(theta)])
-
-    q_str_bs = Quaternion(np.array([
-        np.sin(phi_bs/2)*e_bs[0],
-        np.sin(phi_bs/2)*e_bs[1],
-        np.sin(phi_bs/2)*e_bs[2],
-        np.cos(phi_bs/2)]).reshape(4, 1))
-
-    # Star tracker measurment
-    q_str = q_true.cross(q_str_bs.cross(q_str_roll))
-
-    return q_str
-
+# Project libs
+from orbit import Orbit
+from my_util import RK4_single_step, skew_mtx, orb_2_pqw, perif_2_eci
+from body import Body, Spacecraft
+from quaternion import Quaternion
+from reactionwh import ReactionWh
 
 def y_dot_nadir(t, y, fun_arg: list):
 
@@ -111,6 +57,32 @@ def y_dot_nadir(t, y, fun_arg: list):
 
     return np.concatenate([v, a, q_sat_dot.value.flatten(), sat_w_dot.flatten()])
 
+def sat_dynamics(sat_h, sat_w, Lwh_b):
+    # EOM
+    return np.linalg.inv(JB)@(-Lwh_b-(np.cross(sat_w, sat_h, axis=0)))
+
+def P_dyanmics(t0, y0, fun_arg):
+    P = y0
+    F = fun_arg[0]
+    G = fun_arg[1]
+    Q = fun_arg[2]
+    P_dot = (F@P) + (P@F.T) + (G@Q@G.T)
+    return P_dot
+
+def F_mtx(sat_w_pos):
+
+    return np.block([
+        [-skew_mtx(sat_w_pos.flatten()), -np.eye(3)],
+        [np.zeros((3, 3)), np.zeros((3, 3))]
+    ])
+
+def rv_to_lvlh(r, v):
+    # Define LVLH frame
+    O1 = -r/np.linalg.norm(r)
+    O2 = -np.cross(r, v)/np.linalg.norm(np.cross(r, v))
+    O3 = np.cross(O1, O2)
+
+    return np.stack([O1, O2, O3], axis=1)
 
 def unpack_state_ar(yi):
     # Unpacks a state to components for calculations
@@ -121,19 +93,40 @@ def unpack_state_ar(yi):
 
     return r, v, q_sat, sat_w
 
+def star_tracker_measurment(q_true):
+    rng = np.random.default_rng()
 
-def rv_to_lvlh(r, v):
-    # Define LVLH frame
-    O1 = -r/np.linalg.norm(r)
-    O2 = -np.cross(r, v)/np.linalg.norm(np.cross(r, v))
-    O3 = np.cross(O1, O2)
+    # Model from:
+    # https://s3vi.ndc.nasa.gov/ssri-kb/static/resources/Attitude%20Determination%20&%20Control%20System%20Design%20and%20Implementation.pdf
 
-    return np.stack([O1, O2, O3], axis=1)
+    sigma_roll = 40 * (np.pi / (180*3600))  # arcsec to rad
+    sigma_bs = 6 * (np.pi / (180*3600))  # arcsec to rad
 
+    phi_roll = rng.normal(0.0, sigma_roll)
+    phi_bs = rng.normal(0.0, sigma_bs)
 
-def sat_dynamics(sat_h, sat_w, Lwh_b):
-    # EOM
-    return np.linalg.inv(JB)@(-Lwh_b-(np.cross(sat_w, sat_h, axis=0)))
+    # Error in roll
+    e_r = np.array([1, 0, 0])
+    q_str_roll = Quaternion(np.array([
+        np.sin(phi_roll/2)*e_r[0],
+        np.sin(phi_roll/2)*e_r[1],
+        np.sin(phi_roll/2)*e_r[2],
+        np.cos(phi_roll/2)]).reshape(4, 1))
+
+    # Error in boresight
+    theta = rng.uniform(-np.deg2rad(1), np.deg2rad(1))
+    e_bs = np.array([0, np.cos(theta), np.sin(theta)])
+
+    q_str_bs = Quaternion(np.array([
+        np.sin(phi_bs/2)*e_bs[0],
+        np.sin(phi_bs/2)*e_bs[1],
+        np.sin(phi_bs/2)*e_bs[2],
+        np.cos(phi_bs/2)]).reshape(4, 1))
+
+    # Star tracker measurment
+    q_str = q_true.cross(q_str_bs.cross(q_str_roll))
+
+    return q_str
 
 
 # Define Earth and Parking Orbit
@@ -211,7 +204,7 @@ bodies = [moon]
 epoch = Time("2026-11-08")
 dt = TimeDelta(0.1, format='sec')
 # dt_steps = np.round((sat_orbit.period(sat_orbit.a, sat_orbit.mu).value/40)/dt.value)
-dt_steps = np.round((60)/dt.value)
+dt_steps = np.round((120)/dt.value)
 t0 = epoch - dt*dt_steps + dt
 tf = epoch
 ts_sim = np.arange(t0, tf+dt, dt)
@@ -262,8 +255,8 @@ ts_ekf[0] = t0
 sigma_v = np.sqrt(10) * 10**-10  # rad/(s^3/2)
 sigma_u = np.sqrt(10) * 10**-7
 
-eta_v = rng.normal(0.0, sigma_v**2)
-eta_u = rng.normal(0.0, sigma_u**2)
+eta_v = rng.normal(0.0, sigma_v)
+eta_u = rng.normal(0.0, sigma_u)
 
 beta = 0.01 * (np.pi/180) * (1/3600)  # rad/s
 beta_true = np.array([beta, beta, beta]).reshape(3, 1)
@@ -287,7 +280,7 @@ G = np.block([
 
 Q = np.block([
     [(sigma_v**2)*np.eye(3), np.zeros((3, 3))],
-    [np.zeros((3, 3)), np.zeros((3, 3))]
+    [np.zeros((3, 3)), (sigma_u**2)*np.eye(3)]
 ])
 
 # For Plotting
@@ -365,7 +358,7 @@ for i in range(n_steps-1):
     # Calc Control Moment for estimated state
     q_error_ekf = q_sat_pos.cross(q_c.inverse())
     Lwh_b_ekf = (-kp*np.sign(q_error_ekf.q4) *
-                 q_error_ekf.vector - kd*sat_w_sim)*-1
+                 q_error_ekf.vector - kd*sat_w_pos)*-1
 
     # Updates state with posterior estimate values
     ys_ekf[i] = np.concatenate([r, v,
@@ -463,7 +456,7 @@ data_dict = {
     "JB": JB
 }
 
-nadir_control_sim_data = np.save("nadir_control_sim_data", np.array(data_dict))
+nadir_control_sim_data = np.save("MEKF_sim_data", np.array(data_dict))
 
 print("Error History SIM")
 print(q_error_hist_sim[-10:-1])
@@ -478,13 +471,3 @@ print(f"tf: {tf}")
 print(f"tf-t0: {(tf-t0).to(u.s)}")
 print(f"q_sat0_sim: {q_sat0_sim}")
 print(f"q_sat0_ekf: {q_sat0_ekf}")
-
-print(DEBUG)
-
-# print(F_mtx(sat_w_pos))
-# print(G)
-# print(H)
-# print(Q)
-# print(P_pos)
-
-# OUTPUT
