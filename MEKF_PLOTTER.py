@@ -16,7 +16,7 @@ import time
 """ ######### """
 """ LOAD DATA """
 """ ######### """
-data = np.load("nadir_control_sim_data.npy", allow_pickle=True)[()]
+data = np.load("MEKF_sim_data.npy", allow_pickle=True)[()]
 
 r_hist = data["r_hist"]
 v_hist = data["v_hist"]
@@ -242,7 +242,7 @@ if plot_beta:
 """ ######################### """
 """ PLOTTING Q NORM CONTRAINT """
 """ ######################### """
-plot_norm_constraint = True
+plot_norm_constraint = False
 if plot_norm_constraint:
 
     q_sat_hist_norm = np.linalg.norm(q_sat_hist, axis=1)

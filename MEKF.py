@@ -18,6 +18,7 @@ from body import Body, Spacecraft
 from quaternion import Quaternion
 from reactionwh import ReactionWh
 
+
 def y_dot_nadir(t, y, fun_arg: list):
 
     # Unpack state
@@ -57,9 +58,11 @@ def y_dot_nadir(t, y, fun_arg: list):
 
     return np.concatenate([v, a, q_sat_dot.value.flatten(), sat_w_dot.flatten()])
 
+
 def sat_dynamics(sat_h, sat_w, Lwh_b):
     # EOM
     return np.linalg.inv(JB)@(-Lwh_b-(np.cross(sat_w, sat_h, axis=0)))
+
 
 def P_dyanmics(t0, y0, fun_arg):
     P = y0
@@ -69,12 +72,14 @@ def P_dyanmics(t0, y0, fun_arg):
     P_dot = (F@P) + (P@F.T) + (G@Q@G.T)
     return P_dot
 
+
 def F_mtx(sat_w_pos):
 
     return np.block([
         [-skew_mtx(sat_w_pos.flatten()), -np.eye(3)],
         [np.zeros((3, 3)), np.zeros((3, 3))]
     ])
+
 
 def rv_to_lvlh(r, v):
     # Define LVLH frame
@@ -84,6 +89,7 @@ def rv_to_lvlh(r, v):
 
     return np.stack([O1, O2, O3], axis=1)
 
+
 def unpack_state_ar(yi):
     # Unpacks a state to components for calculations
     r = yi[0:3]
@@ -92,6 +98,7 @@ def unpack_state_ar(yi):
     sat_w = yi[10:].reshape(3, 1)
 
     return r, v, q_sat, sat_w
+
 
 def star_tracker_measurment(q_true):
     rng = np.random.default_rng()
@@ -107,7 +114,7 @@ def star_tracker_measurment(q_true):
 
     # Error in roll
     e_r = np.array([1, 0, 0])
-    q_str_roll = Quaternion(np.array([
+    q_str_ms_roll = Quaternion(np.array([
         np.sin(phi_roll/2)*e_r[0],
         np.sin(phi_roll/2)*e_r[1],
         np.sin(phi_roll/2)*e_r[2],
@@ -117,16 +124,16 @@ def star_tracker_measurment(q_true):
     theta = rng.uniform(-np.deg2rad(1), np.deg2rad(1))
     e_bs = np.array([0, np.cos(theta), np.sin(theta)])
 
-    q_str_bs = Quaternion(np.array([
+    q_str_ms_bs = Quaternion(np.array([
         np.sin(phi_bs/2)*e_bs[0],
         np.sin(phi_bs/2)*e_bs[1],
         np.sin(phi_bs/2)*e_bs[2],
         np.cos(phi_bs/2)]).reshape(4, 1))
 
     # Star tracker measurment
-    q_str = q_true.cross(q_str_bs.cross(q_str_roll))
+    q_str_ms = q_true.cross(q_str_ms_bs.cross(q_str_ms_roll))
 
-    return q_str
+    return q_str_ms
 
 
 # Define Earth and Parking Orbit
@@ -258,6 +265,7 @@ sigma_u = np.sqrt(10) * 10**-7
 eta_v = rng.normal(0.0, sigma_v)
 eta_u = rng.normal(0.0, sigma_u)
 
+# True gyro bias = 0.1 deg/hour
 beta = 0.01 * (np.pi/180) * (1/3600)  # rad/s
 beta_true = np.array([beta, beta, beta]).reshape(3, 1)
 beta_hat_prior = np.zeros((3, 1))
@@ -302,7 +310,7 @@ print("Started SIM")
 for i in range(n_steps-1):
 
     """
-    SIM
+    IDEAL
     """
     # Unpack simlutoin state
     r, v, q_sat_sim, sat_w_sim = unpack_state_ar(ys_sim[i])
@@ -337,10 +345,10 @@ for i in range(n_steps-1):
     P_pos = (np.eye(6) - K@H) @ P_pri
 
     # True quaternion comes from simulation
-    q_str = star_tracker_measurment(q_sat_sim)
+    q_str_ms = star_tracker_measurment(q_sat_sim)
 
-    y = 2*((q_str.cross(q_sat_pri.inverse()).vector) /
-           (q_str.cross(q_sat_pri.inverse()).scalor))
+    y = 2*((q_str_ms.cross(q_sat_pri.inverse()).vector) /
+           (q_str_ms.cross(q_sat_pri.inverse()).scalor))
 
     ekf_x_hat_post = K @ y
 
